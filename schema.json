@@ -1,0 +1,180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://fiduciaryplan.app/schema/v1",
+  "title": "FiduciaryPlan Data Model",
+  "description": "Versioned schema for the FiduciaryPlan user data model. All fields optional unless marked required.",
+  "type": "object",
+  "required": ["schemaVersion", "meta", "intake", "assumptions"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "enum": ["1.0"],
+      "description": "Schema version for migration compatibility"
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "createdAt":  { "type": "string", "format": "date-time" },
+        "updatedAt":  { "type": "string", "format": "date-time" },
+        "name":       { "type": "string", "description": "Optional display name, local only" }
+      }
+    },
+    "intake": {
+      "type": "object",
+      "properties": {
+        "basics": {
+          "type": "object",
+          "properties": {
+            "name":         { "type": "string" },
+            "age":          { "type": "integer", "minimum": 18, "maximum": 120 },
+            "state":        { "type": "string", "description": "Two-letter US state code" },
+            "filingStatus": { "type": "string", "enum": ["single","mfj","mfs","hoh"] },
+            "dependents":   { "type": "integer", "minimum": 0 },
+            "spouseAge":    { "type": "integer", "minimum": 18, "maximum": 120 },
+            "spouseIncome": { "type": "number", "minimum": 0 }
+          }
+        },
+        "income": {
+          "type": "object",
+          "properties": {
+            "grossIncome":    { "type": "number", "minimum": 0, "description": "Annual household gross income" },
+            "incomeType":     { "type": "string", "enum": ["w2","1099","business","mixed"] },
+            "bonusAmount":    { "type": "number", "minimum": 0 },
+            "expectedGrowth": { "type": "string", "enum": ["declining","flat","slow","moderate","fast"] }
+          }
+        },
+        "cash": {
+          "type": "object",
+          "properties": {
+            "checking":       { "type": "number", "minimum": 0 },
+            "savings":        { "type": "number", "minimum": 0, "description": "HYSA, money market, savings combined" },
+            "emergencyTarget":{ "type": "number", "minimum": 1, "maximum": 24, "description": "Target months of expenses" }
+          }
+        },
+        "retirement": {
+          "type": "object",
+          "properties": {
+            "k401Balance":       { "type": "number", "minimum": 0, "description": "Pre-tax 401k/403b balance" },
+            "k401Roth":          { "type": "number", "minimum": 0, "description": "Roth 401k balance" },
+            "iraBalance":        { "type": "number", "minimum": 0 },
+            "rothIraBalance":    { "type": "number", "minimum": 0 },
+            "hsaBalance":        { "type": "number", "minimum": 0 },
+            "contributionRate":  { "type": "number", "minimum": 0, "maximum": 100, "description": "Percent of salary" },
+            "employerMatch":     { "type": "number", "minimum": 0, "maximum": 100, "description": "Employer match percent of salary" }
+          }
+        },
+        "investments": {
+          "type": "object",
+          "properties": {
+            "brokerageBalance":  { "type": "number", "minimum": 0 },
+            "stockPct":          { "type": "number", "minimum": 0, "maximum": 100 },
+            "monthlyContrib":    { "type": "number", "minimum": 0 }
+          }
+        },
+        "realEstate": {
+          "type": "object",
+          "properties": {
+            "ownOrRent":      { "type": "string", "enum": ["own","rent"] },
+            "primaryValue":   { "type": "number", "minimum": 0 },
+            "mortgageBalance":{ "type": "number", "minimum": 0 },
+            "mortgageRate":   { "type": "number", "minimum": 0, "maximum": 30 }
+          }
+        },
+        "debts": {
+          "type": "object",
+          "properties": {
+            "studentLoanBalance": { "type": "number", "minimum": 0 },
+            "studentLoanRate":    { "type": "number", "minimum": 0, "maximum": 30 },
+            "autoBalance":        { "type": "number", "minimum": 0 },
+            "creditCardBalance":  { "type": "number", "minimum": 0 }
+          }
+        },
+        "lifeEvents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type":           { "type": "string" },
+              "targetYear":     { "type": "integer" },
+              "estimatedCost":  { "type": "number", "minimum": 0 },
+              "priority":       { "type": "string", "enum": ["must-have","want","nice-to-have"] }
+            }
+          }
+        },
+        "retirementVision": {
+          "type": "object",
+          "properties": {
+            "targetRetirementAge": { "type": "integer", "minimum": 40, "maximum": 80 },
+            "desiredAnnualSpend":  { "type": "number", "minimum": 0, "description": "In today's dollars" },
+            "legacyGoal":          { "type": "string", "enum": ["none","modest","significant","charity"] },
+            "relocate":            { "type": "string", "enum": ["no","yes_lower","yes_higher","international"] }
+          }
+        },
+        "risk": {
+          "type": "object",
+          "properties": {
+            "riskTolerance":     { "type": "integer", "minimum": 1, "maximum": 5 },
+            "investPhilosophy":  { "type": "string", "enum": ["passive","active","mixed"] }
+          }
+        },
+        "estate": {
+          "type": "object",
+          "properties": {
+            "hasWill":        { "type": "string", "enum": ["yes","outdated","no"] },
+            "hasTrust":       { "type": "string", "enum": ["yes","no","considering"] },
+            "lifeInsurance":  { "type": "number", "minimum": 0, "description": "Death benefit total" },
+            "disabilityIns":  { "type": "string", "enum": ["yes_employer","yes_private","no"] }
+          }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "object",
+      "description": "User-editable model assumptions. All rates are decimals (e.g. 0.09 = 9%).",
+      "properties": {
+        "equityReturn":        { "type": "number", "description": "Nominal equity return. Source: Damodaran US historical avg" },
+        "bondReturn":          { "type": "number", "description": "Nominal bond return. Source: 10yr treasury + spread" },
+        "inflation":           { "type": "number", "description": "CPI inflation. Source: Fed 2% target + buffer" },
+        "wageGrowth":          { "type": "number" },
+        "healthcareInflation": { "type": "number" },
+        "lifeExpectancy":      { "type": "number" },
+        "collegeInflation":    { "type": "number" },
+        "ssAge":               { "type": "number", "description": "Social Security claim age" },
+        "monteCarloRuns":      { "type": "integer", "minimum": 100, "maximum": 5000 }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "description": "Saved what-if scenarios",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id":          { "type": "string" },
+          "name":        { "type": "string" },
+          "createdAt":   { "type": "string", "format": "date-time" },
+          "assumptions": { "type": "object" },
+          "intakeOverrides": { "type": "object" }
+        }
+      }
+    },
+    "advisorHistory": {
+      "type": "array",
+      "description": "AI advisor conversation log for the current session",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role":    { "type": "string", "enum": ["user","assistant"] },
+          "content": { "type": "string" }
+        }
+      }
+    },
+    "intakeProgress": {
+      "type": "object",
+      "properties": {
+        "currentSection":  { "type": "integer" },
+        "currentQuestion": { "type": "integer" },
+        "completed":       { "type": "boolean" }
+      }
+    }
+  }
+}

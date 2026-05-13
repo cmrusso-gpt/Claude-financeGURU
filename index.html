@@ -1,0 +1,1743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FiduciaryPlan — Personal Financial Planner</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  .chat-bubble { animation: fadeIn 0.3s ease-in; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  input[type=range] { accent-color: #4f46e5; }
+  .tab-active { border-bottom: 2px solid #4f46e5; color: #4f46e5; }
+  .spinner { border: 3px solid #e5e7eb; border-top-color: #4f46e5; border-radius: 50%; width:20px; height:20px; animation: spin 0.8s linear infinite; display:inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="root"></div>
+<script type="module">
+import React, { useState, useEffect, useReducer, useRef, useCallback, useMemo } from 'https://esm.sh/react@18';
+import { createRoot } from 'https://esm.sh/react-dom@18/client';
+import htm from 'https://esm.sh/htm@3';
+import {
+  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, AreaChart, Area, ReferenceLine
+} from 'https://esm.sh/recharts@2';
+
+const html = htm.bind(React.createElement);
+const __DEV__ = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+
+// ============================================================
+// SECTION: CONSTANTS & DEFAULTS
+// ============================================================
+
+const SCHEMA_VERSION = '1.0';
+const LS_KEY = 'financePlan_v1';
+const LS_APIKEY = 'fp_anthropic_key';
+
+// 2026 federal brackets (estimated ~2.7% inflation adj from 2025 IRS Rev Proc 2024-40)
+// Source: IRS Rev Proc 2024-40, projected forward
+const FED_BRACKETS = {
+  single: [
+    { min: 0,       max: 12200,   rate: 0.10 },
+    { min: 12200,   max: 49750,   rate: 0.12 },
+    { min: 49750,   max: 106050,  rate: 0.22 },
+    { min: 106050,  max: 202550,  rate: 0.24 },
+    { min: 202550,  max: 257050,  rate: 0.32 },
+    { min: 257050,  max: 642950,  rate: 0.35 },
+    { min: 642950,  max: Infinity,rate: 0.37 },
+  ],
+  mfj: [
+    { min: 0,       max: 24400,   rate: 0.10 },
+    { min: 24400,   max: 99500,   rate: 0.12 },
+    { min: 99500,   max: 212100,  rate: 0.22 },
+    { min: 212100,  max: 405100,  rate: 0.24 },
+    { min: 405100,  max: 514100,  rate: 0.32 },
+    { min: 514100,  max: 771550,  rate: 0.35 },
+    { min: 771550,  max: Infinity,rate: 0.37 },
+  ],
+};
+FED_BRACKETS.hoh = FED_BRACKETS.single; // simplified
+FED_BRACKETS.mfs = FED_BRACKETS.single;
+
+const STD_DEDUCTION = { single: 15000, mfj: 30000, hoh: 22500, mfs: 15000 };
+
+// 2026 contribution limits
+const LIMITS = {
+  k401: 23500, k401_catchup: 31000, // age 50+
+  ira: 7000,   ira_catchup: 8000,
+  hsa_single: 4300, hsa_family: 8550,
+  k401_total: 70000,
+};
+
+// State income tax — simplified top marginal rate + flag for graduated
+// Source: Tax Foundation 2025 State Income Tax Rates (projected stable for 2026)
+const STATE_TAX = {
+  AK:{rate:0,    flat:false}, AL:{rate:0.05,  flat:false}, AR:{rate:0.044, flat:false},
+  AZ:{rate:0.025,flat:true},  CA:{rate:0.133, flat:false}, CO:{rate:0.044, flat:true},
+  CT:{rate:0.0699,flat:false},DC:{rate:0.1075,flat:false}, DE:{rate:0.066, flat:false},
+  FL:{rate:0,    flat:false}, GA:{rate:0.055, flat:false}, HI:{rate:0.11,  flat:false},
+  IA:{rate:0.057,flat:false}, ID:{rate:0.058, flat:false}, IL:{rate:0.0495,flat:true},
+  IN:{rate:0.0305,flat:true}, KS:{rate:0.057, flat:false}, KY:{rate:0.045, flat:true},
+  LA:{rate:0.03, flat:false}, MA:{rate:0.09,  flat:false}, MD:{rate:0.0575,flat:false},
+  ME:{rate:0.0715,flat:false},MI:{rate:0.0425,flat:true},  MN:{rate:0.0985,flat:false},
+  MO:{rate:0.048,flat:false}, MS:{rate:0.05,  flat:false}, MT:{rate:0.069, flat:false},
+  NC:{rate:0.0425,flat:true}, ND:{rate:0.024, flat:false}, NE:{rate:0.0664,flat:false},
+  NH:{rate:0,    flat:false}, NJ:{rate:0.1075,flat:false}, NM:{rate:0.059, flat:false},
+  NV:{rate:0,    flat:false}, NY:{rate:0.109, flat:false}, OH:{rate:0.035, flat:false},
+  OK:{rate:0.045,flat:false}, OR:{rate:0.099, flat:false}, PA:{rate:0.0307,flat:true},
+  RI:{rate:0.0599,flat:false},SC:{rate:0.064, flat:false}, SD:{rate:0,     flat:false},
+  TN:{rate:0,    flat:false}, TX:{rate:0,     flat:false}, UT:{rate:0.0465,flat:true},
+  VA:{rate:0.0575,flat:false},VT:{rate:0.0875,flat:false}, WA:{rate:0,     flat:false},
+  WI:{rate:0.0765,flat:false},WV:{rate:0.065, flat:false}, WY:{rate:0,     flat:false},
+};
+
+const US_STATES = ['AK','AL','AR','AZ','CA','CO','CT','DC','DE','FL','GA','HI','IA','ID',
+  'IL','IN','KS','KY','LA','MA','MD','ME','MI','MN','MO','MS','MT','NC','ND','NE','NH',
+  'NJ','NM','NV','NY','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VA','VT','WA',
+  'WI','WV','WY'];
+
+const DEFAULT_ASSUMPTIONS = {
+  equityReturn:      0.09,   // nominal; Source: Damodaran historical avg
+  bondReturn:        0.045,  // nominal; Source: 10yr treasury + spread
+  inflation:         0.025,  // Source: Federal Reserve 2% target + buffer
+  wageGrowth:        0.03,
+  healthcareInflation:0.05,
+  lifeExpectancy:    90,
+  collegeInflation:  0.05,
+  ssAge:             67,
+  monteCarloRuns:    500,
+};
+
+const FRESH_PLAN = () => ({
+  schemaVersion: SCHEMA_VERSION,
+  meta: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), name: '' },
+  intake: {
+    basics: {},
+    income: {},
+    cash: {},
+    retirement: {},
+    investments: {},
+    realEstate: {},
+    debts: {},
+    lifeEvents: [],
+    retirementVision: {},
+    risk: {},
+    estate: {},
+  },
+  assumptions: { ...DEFAULT_ASSUMPTIONS },
+  scenarios: [],
+  advisorHistory: [],
+  intakeProgress: { currentSection: 0, currentQuestion: 0, completed: false },
+});
+
+// ============================================================
+// SECTION: CALCULATION ENGINE
+// ============================================================
+
+function calcFederalTax(taxableIncome, filingStatus) {
+  const brackets = FED_BRACKETS[filingStatus] || FED_BRACKETS.single;
+  let tax = 0;
+  for (const b of brackets) {
+    if (taxableIncome <= b.min) break;
+    tax += (Math.min(taxableIncome, b.max) - b.min) * b.rate;
+  }
+  return Math.max(0, tax);
+}
+
+function getMarginalRate(taxableIncome, filingStatus) {
+  const brackets = FED_BRACKETS[filingStatus] || FED_BRACKETS.single;
+  for (const b of [...brackets].reverse()) {
+    if (taxableIncome > b.min) return b.rate;
+  }
+  return 0.10;
+}
+
+function calcStateTax(grossIncome, state) {
+  const st = STATE_TAX[state] || { rate: 0, flat: false };
+  if (st.rate === 0) return 0;
+  if (st.flat) return grossIncome * st.rate;
+  // Simplified graduated: apply top rate to income above 50th percentile threshold
+  const threshold = 60000;
+  if (grossIncome <= threshold) return grossIncome * st.rate * 0.5;
+  return threshold * st.rate * 0.4 + (grossIncome - threshold) * st.rate;
+}
+
+function calcFica(grossIncome) {
+  const ssWageBase = 176100; // 2026 estimated
+  const ss = Math.min(grossIncome, ssWageBase) * 0.062;
+  const medicare = grossIncome * 0.0145;
+  const additionalMedicare = grossIncome > 200000 ? (grossIncome - 200000) * 0.009 : 0;
+  return { ss, medicare, additionalMedicare, total: ss + medicare + additionalMedicare };
+}
+
+function calcTaxes(intake) {
+  const gross = Number(intake.income?.grossIncome) || 0;
+  const fs = intake.basics?.filingStatus || 'single';
+  const state = intake.basics?.state || 'CA';
+  const std = STD_DEDUCTION[fs] || 15000;
+  const k401Contrib = (Number(intake.retirement?.contributionRate) || 0) / 100 * gross;
+  const hsaContrib = Number(intake.retirement?.hsaContrib) || 0;
+  const agi = Math.max(0, gross - k401Contrib - hsaContrib);
+  const taxableIncome = Math.max(0, agi - std);
+  const federal = calcFederalTax(taxableIncome, fs);
+  const fica = calcFica(gross);
+  const stateTax = calcStateTax(gross, state);
+  const totalTax = federal + fica.total + stateTax;
+  const effectiveRate = gross > 0 ? totalTax / gross : 0;
+  const marginalRate = getMarginalRate(taxableIncome, fs);
+  return { gross, agi, taxableIncome, federal, fica: fica.total, stateTax, totalTax, effectiveRate, marginalRate, std, k401Contrib };
+}
+
+function calcNetWorth(intake) {
+  const i = intake;
+  const assets = {
+    checking:    Number(i.cash?.checking)       || 0,
+    savings:     Number(i.cash?.savings)        || 0,
+    k401:        Number(i.retirement?.k401Balance) || 0,
+    k401Roth:    Number(i.retirement?.k401Roth)    || 0,
+    ira:         Number(i.retirement?.iraBalance)  || 0,
+    rothIra:     Number(i.retirement?.rothIraBalance) || 0,
+    hsa:         Number(i.retirement?.hsaBalance)  || 0,
+    brokerage:   Number(i.investments?.brokerageBalance) || 0,
+    realEstate:  Number(i.realEstate?.primaryValue)      || 0,
+  };
+  const liabilities = {
+    mortgage:    Number(i.realEstate?.mortgageBalance) || 0,
+    studentLoan: Number(i.debts?.studentLoanBalance)   || 0,
+    auto:        Number(i.debts?.autoBalance)          || 0,
+    creditCard:  Number(i.debts?.creditCardBalance)    || 0,
+  };
+  const totalAssets = Object.values(assets).reduce((a,b)=>a+b,0);
+  const totalLiab   = Object.values(liabilities).reduce((a,b)=>a+b,0);
+  return { assets, liabilities, totalAssets, totalLiab, netWorth: totalAssets - totalLiab };
+}
+
+function calcCashFlow(intake) {
+  const taxes = calcTaxes(intake);
+  const gross = taxes.gross;
+  const netAfterTax = gross - taxes.totalTax;
+  const annualDebtPmts = calcDebtPayments(intake);
+  const k401Contrib = taxes.k401Contrib;
+  const investContrib = (Number(intake.investments?.monthlyContrib) || 0) * 12;
+  const discretionary = netAfterTax - annualDebtPmts - investContrib;
+  const savingsRate = gross > 0 ? (k401Contrib + investContrib) / gross : 0;
+  return { gross, taxes, netAfterTax, annualDebtPmts, k401Contrib, investContrib, discretionary, savingsRate };
+}
+
+function calcDebtPayments(intake) {
+  const d = intake.debts || {};
+  // Simplified: 1% of balance per month for revolving, rough estimates
+  const sl = Number(d.studentLoanBalance) || 0;
+  const auto = Number(d.autoBalance) || 0;
+  const cc = Number(d.creditCardBalance) || 0;
+  return (sl * 0.01 + auto * 0.02 + cc * 0.02) * 12;
+}
+
+function calcEmergencyMonths(intake) {
+  const liquid = (Number(intake.cash?.checking) || 0) + (Number(intake.cash?.savings) || 0);
+  const gross = Number(intake.income?.grossIncome) || 0;
+  const monthly = gross / 12;
+  return monthly > 0 ? liquid / monthly : 0;
+}
+
+// Retirement projection — returns yearly data points
+function calcProjection(intake, assumptions, scenarioOffset = 0) {
+  const age = Number(intake.basics?.age) || 35;
+  const retireAge = Number(intake.retirementVision?.targetRetirementAge) || 65;
+  const lifeExp = Number(assumptions.lifeExpectancy) || 90;
+  const gross = Number(intake.income?.grossIncome) || 0;
+  const wageGrowth = Number(assumptions.wageGrowth) || 0.03;
+  const k401Rate = (Number(intake.retirement?.contributionRate) || 0) / 100;
+  const employerMatch = (Number(intake.retirement?.employerMatch) || 0) / 100;
+  const matchCap = 0.06; // typical: match up to 6% of salary
+  const equityReturn = Number(assumptions.equityReturn) + scenarioOffset;
+  const bondReturn = Number(assumptions.bondReturn) + scenarioOffset * 0.5;
+  const stockPct = (Number(intake.investments?.stockPct) || 70) / 100;
+  const blendedReturn = stockPct * equityReturn + (1 - stockPct) * bondReturn;
+  const inflation = Number(assumptions.inflation) || 0.025;
+  const realReturn = blendedReturn - inflation;
+
+  const startBalance =
+    (Number(intake.retirement?.k401Balance)    || 0) +
+    (Number(intake.retirement?.k401Roth)       || 0) +
+    (Number(intake.retirement?.iraBalance)     || 0) +
+    (Number(intake.retirement?.rothIraBalance) || 0) +
+    (Number(intake.investments?.brokerageBalance) || 0);
+
+  const points = [];
+  let balance = startBalance;
+  let income = gross;
+  const desiredSpend = Number(intake.retirementVision?.desiredAnnualSpend) || gross * 0.7;
+
+  for (let yr = 0; yr <= lifeExp - age; yr++) {
+    const currentAge = age + yr;
+    if (currentAge < retireAge) {
+      const empContrib = income * Math.min(k401Rate, matchCap) * employerMatch + income * k401Rate;
+      const brokerageContrib = (Number(intake.investments?.monthlyContrib) || 0) * 12;
+      balance = balance * (1 + blendedReturn) + empContrib + brokerageContrib;
+      income *= (1 + wageGrowth);
+    } else {
+      // drawdown
+      const withdrawal = desiredSpend * Math.pow(1 + inflation, yr - (retireAge - age));
+      balance = balance * (1 + blendedReturn) - withdrawal;
+    }
+    points.push({ age: currentAge, balance: Math.round(Math.max(0, balance)), year: new Date().getFullYear() + yr });
+  }
+  return points;
+}
+
+// Monte Carlo — returns percentile bands
+function runMonteCarlo(intake, assumptions) {
+  const N = Math.min(Number(assumptions.monteCarloRuns) || 500, 500);
+  const age = Number(intake.basics?.age) || 35;
+  const retireAge = Number(intake.retirementVision?.targetRetirementAge) || 65;
+  const years = retireAge - age;
+  if (years <= 0) return null;
+
+  const mu = Number(assumptions.equityReturn) || 0.09;
+  const sigma = 0.15; // annual std dev
+  const results = [];
+
+  for (let n = 0; n < N; n++) {
+    const startBalance = (Number(intake.retirement?.k401Balance)||0) + (Number(intake.retirement?.k401Roth)||0) +
+      (Number(intake.retirement?.iraBalance)||0) + (Number(intake.investments?.brokerageBalance)||0);
+    let bal = startBalance;
+    const k401Rate = (Number(intake.retirement?.contributionRate)||0)/100;
+    let income = Number(intake.income?.grossIncome)||0;
+    for (let y = 0; y < years; y++) {
+      // Box-Muller
+      const u1 = Math.random(), u2 = Math.random();
+      const z = Math.sqrt(-2*Math.log(u1)) * Math.cos(2*Math.PI*u2);
+      const r = mu + sigma * z;
+      bal = bal * (1 + r) + income * k401Rate;
+      income *= (1 + (Number(assumptions.wageGrowth)||0.03));
+    }
+    results.push(Math.max(0, bal));
+  }
+  results.sort((a,b)=>a-b);
+  const pct = (p) => results[Math.floor(N * p / 100)];
+  return { p10: pct(10), p25: pct(25), p50: pct(50), p75: pct(75), p90: pct(90), median: pct(50) };
+}
+
+function calcSocialSecurity(intake) {
+  // SSA quick estimator: ~40% replacement at FRA for median earner, scaled
+  const gross = Number(intake.income?.grossIncome) || 0;
+  const age = Number(intake.basics?.age) || 35;
+  const ssAge = Number(intake.assumptions?.ssAge) || 67;
+  // Simplified PIA estimate
+  const aime = Math.min(gross / 12, 12000);
+  let pia;
+  if (aime <= 1115) pia = aime * 0.90;
+  else if (aime <= 6721) pia = 1115 * 0.90 + (aime - 1115) * 0.32;
+  else pia = 1115 * 0.90 + (6721 - 1115) * 0.32 + (aime - 6721) * 0.15;
+  return { monthly: Math.round(pia), annual: Math.round(pia * 12) };
+}
+
+function calcRetirementReadiness(intake, assumptions) {
+  const projection = calcProjection(intake, assumptions, 0);
+  const age = Number(intake.basics?.age) || 35;
+  const retireAge = Number(intake.retirementVision?.targetRetirementAge) || 65;
+  const retireIdx = retireAge - age;
+  const retireBalance = projection[retireIdx]?.balance || 0;
+  const ss = calcSocialSecurity(intake);
+  const desiredSpend = Number(intake.retirementVision?.desiredAnnualSpend) || (Number(intake.income?.grossIncome)||0) * 0.7;
+  const portfolioIncome = retireBalance * 0.04;
+  const totalIncome = portfolioIncome + ss.annual;
+  const gap = desiredSpend - totalIncome;
+  const successRate = gap <= 0 ? 95 : Math.max(20, Math.round(95 - (gap / desiredSpend) * 100));
+  const bridgeYears = Math.max(0, (Number(assumptions.ssAge)||67) - retireAge);
+  return { retireBalance, portfolioIncome, ssMonthly: ss.monthly, ssAnnual: ss.annual, totalIncome, desiredSpend, gap, successRate, bridgeYears };
+}
+
+function generateObservations(intake, assumptions) {
+  const obs = [];
+  const nw = calcNetWorth(intake);
+  const cf = calcCashFlow(intake);
+  const em = calcEmergencyMonths(intake);
+  const rr = calcRetirementReadiness(intake, assumptions);
+
+  if (em < 3) obs.push({ type: 'warning', text: `Emergency fund covers ${em.toFixed(1)} months. Target is 3–6. Prioritize liquid savings before increasing investments.` });
+  else if (em >= 6) obs.push({ type: 'info', text: `Emergency fund covers ${em.toFixed(1)} months — solid. Consider moving excess above 6 months into a higher-yield vehicle.` });
+
+  if (cf.savingsRate < 0.10) obs.push({ type: 'warning', text: `Savings rate is ${(cf.savingsRate*100).toFixed(1)}%. A fiduciary minimum is 15%. Each 1% increase now compounds significantly over decades.` });
+  else if (cf.savingsRate >= 0.20) obs.push({ type: 'success', text: `Savings rate of ${(cf.savingsRate*100).toFixed(1)}% is strong. Ensure tax-advantaged space is fully utilized before taxable accounts.` });
+
+  const k401Limit = LIMITS.k401;
+  const current401k = cf.k401Contrib;
+  if (current401k < k401Limit * 0.5 && (Number(intake.income?.grossIncome)||0) > 80000) {
+    obs.push({ type: 'opportunity', text: `401(k) contributions ($${fmt(current401k)}/yr) are well below the $${fmt(k401Limit)} limit. Each pre-tax dollar reduces your tax bill at your ${(cf.taxes.marginalRate*100).toFixed(0)}% marginal rate.` });
+  }
+
+  const ccBal = Number(intake.debts?.creditCardBalance) || 0;
+  if (ccBal > 0) obs.push({ type: 'warning', text: `Credit card balance of $${fmt(ccBal)} is a guaranteed high-rate loss. Pay this before any non-employer-matched investing.` });
+
+  if (rr.successRate < 70) obs.push({ type: 'warning', text: `Retirement success probability estimated at ${rr.successRate}%. The gap between projected income ($${fmt(rr.totalIncome)}/yr) and target ($${fmt(rr.desiredSpend)}/yr) needs closing.` });
+  else if (rr.successRate >= 90) obs.push({ type: 'success', text: `Retirement trajectory looks strong (${rr.successRate}% probability). Consider whether you're over-accumulating vs. spending today.` });
+
+  if (!intake.estate?.hasWill) obs.push({ type: 'warning', text: 'No will on file. Intestate succession may not reflect your wishes. This costs <$500 to fix.' });
+
+  return obs.slice(0, 4);
+}
+
+const fmt = (n) => Math.round(n).toLocaleString();
+const fmtPct = (n) => (n * 100).toFixed(1) + '%';
+const fmtCurrency = (n) => '$' + fmt(n);
+
+// ============================================================
+// SECTION: INTAKE QUESTIONS
+// ============================================================
+
+const LIFE_EVENT_OPTIONS = [
+  'House purchase / upgrade','New baby / growing family','Car replacement',
+  'College funding','Wedding','Major travel / sabbatical','Starting a business',
+  'Caring for aging parents','Home renovation','Early retirement / coast FI','Other',
+];
+
+function buildQuestions(intake) {
+  const q = [];
+  const fs = intake.basics?.filingStatus;
+  const deps = Number(intake.basics?.dependents) || 0;
+  const owns = intake.realEstate?.ownOrRent === 'own';
+
+  // SECTION 0: Basics
+  q.push({ id:'basics.name',       section:0, sectionName:'Basics',      label:'What should I call you? (optional — stays on your device)', type:'text',     key:['basics','name'],       optional:true, placeholder:'First name or nickname' });
+  q.push({ id:'basics.age',        section:0, sectionName:'Basics',      label:'How old are you?', type:'number', key:['basics','age'],       min:18, max:100, placeholder:'35' });
+  q.push({ id:'basics.state',      section:0, sectionName:'Basics',      label:'Which state do you live in?', type:'state', key:['basics','state'] });
+  q.push({ id:'basics.filingStatus',section:0,sectionName:'Basics',      label:'What is your tax filing status?', type:'select', key:['basics','filingStatus'],
+    options:[{v:'single',l:'Single'},{v:'mfj',l:'Married Filing Jointly'},{v:'hoh',l:'Head of Household'},{v:'mfs',l:'Married Filing Separately'}] });
+  q.push({ id:'basics.dependents', section:0, sectionName:'Basics',      label:'How many dependents do you claim?', type:'number', key:['basics','dependents'], min:0, max:20, placeholder:'0', optional:true });
+  if (fs === 'mfj' || fs === 'mfs') {
+    q.push({ id:'basics.spouseAge',  section:0, sectionName:'Basics',    label:"Your spouse's age?", type:'number', key:['basics','spouseAge'], min:18, max:100, placeholder:'35' });
+    q.push({ id:'basics.spouseIncome',section:0,sectionName:'Basics',    label:"Spouse's annual gross income (0 if not working)?", type:'currency', key:['basics','spouseIncome'], placeholder:'0', optional:true });
+  }
+
+  // SECTION 1: Income
+  q.push({ id:'income.grossIncome', section:1, sectionName:'Income',     label:'What is your household annual gross income?', type:'currency', key:['income','grossIncome'], placeholder:'100000' });
+  q.push({ id:'income.incomeType',  section:1, sectionName:'Income',     label:'Primary income source?', type:'select', key:['income','incomeType'],
+    options:[{v:'w2',l:'W-2 Employee'},{v:'1099',l:'Self-employed / 1099'},{v:'business',l:'Business owner'},{v:'mixed',l:'Multiple sources'}] });
+  q.push({ id:'income.bonusAmount', section:1, sectionName:'Income',     label:'Annual bonus, RSU, or variable comp (0 if none)?', type:'currency', key:['income','bonusAmount'], placeholder:'0', optional:true });
+  q.push({ id:'income.expectedGrowth',section:1,sectionName:'Income',    label:'Expected income trajectory over the next 5 years?', type:'select', key:['income','expectedGrowth'],
+    options:[{v:'declining',l:'Declining'},{v:'flat',l:'Flat / stable'},{v:'slow',l:'Slow growth (1–2%/yr)'},{v:'moderate',l:'Moderate growth (3–5%/yr)'},{v:'fast',l:'Fast growth (5%+/yr)'}] });
+
+  // SECTION 2: Cash
+  q.push({ id:'cash.checking',      section:2, sectionName:'Cash & Liquidity', label:'Checking account balance?', type:'currency', key:['cash','checking'], placeholder:'5000' });
+  q.push({ id:'cash.savings',       section:2, sectionName:'Cash & Liquidity', label:'Savings / HYSA / money market balance?', type:'currency', key:['cash','savings'], placeholder:'20000', optional:true });
+  q.push({ id:'cash.emergencyTarget',section:2,sectionName:'Cash & Liquidity', label:'Target emergency fund in months of expenses?', type:'slider', key:['cash','emergencyTarget'], min:1, max:12, step:1, defaultVal:6 });
+
+  // SECTION 3: Retirement
+  q.push({ id:'retirement.k401Balance',section:3,sectionName:'Retirement Accounts', label:'401(k) / 403(b) pre-tax balance?', type:'currency', key:['retirement','k401Balance'], placeholder:'0', optional:true });
+  q.push({ id:'retirement.k401Roth', section:3,sectionName:'Retirement Accounts',   label:'Roth 401(k) balance?', type:'currency', key:['retirement','k401Roth'], placeholder:'0', optional:true });
+  q.push({ id:'retirement.iraBalance',section:3,sectionName:'Retirement Accounts',  label:'Traditional IRA balance?', type:'currency', key:['retirement','iraBalance'], placeholder:'0', optional:true });
+  q.push({ id:'retirement.rothIraBalance',section:3,sectionName:'Retirement Accounts',label:'Roth IRA balance?', type:'currency', key:['retirement','rothIraBalance'], placeholder:'0', optional:true });
+  q.push({ id:'retirement.hsaBalance',section:3,sectionName:'Retirement Accounts',  label:'HSA balance?', type:'currency', key:['retirement','hsaBalance'], placeholder:'0', optional:true });
+  q.push({ id:'retirement.contributionRate',section:3,sectionName:'Retirement Accounts',label:'Current 401(k) contribution rate (% of salary)?', type:'slider', key:['retirement','contributionRate'], min:0, max:100, step:1, defaultVal:6 });
+  q.push({ id:'retirement.employerMatch',section:3,sectionName:'Retirement Accounts',label:"Employer 401(k) match (% of salary)?", type:'slider', key:['retirement','employerMatch'], min:0, max:20, step:0.5, defaultVal:3 });
+
+  // SECTION 4: Investments
+  q.push({ id:'investments.brokerageBalance',section:4,sectionName:'Taxable Investments',label:'Taxable brokerage / investment account balance?', type:'currency', key:['investments','brokerageBalance'], placeholder:'0', optional:true });
+  q.push({ id:'investments.stockPct',section:4,sectionName:'Taxable Investments',     label:'Overall stock allocation (% of all investments)?', type:'slider', key:['investments','stockPct'], min:0, max:100, step:5, defaultVal:70 });
+  q.push({ id:'investments.monthlyContrib',section:4,sectionName:'Taxable Investments',label:'Monthly contribution to taxable accounts?', type:'currency', key:['investments','monthlyContrib'], placeholder:'0', optional:true });
+
+  // SECTION 5: Real Estate
+  q.push({ id:'realEstate.ownOrRent',section:5,sectionName:'Real Estate', label:'Do you own or rent your primary residence?', type:'select', key:['realEstate','ownOrRent'],
+    options:[{v:'own',l:'Own'},{v:'rent',l:'Rent'}] });
+  if (owns || intake.realEstate?.ownOrRent === 'own') {
+    q.push({ id:'realEstate.primaryValue',section:5,sectionName:'Real Estate',label:'Estimated current market value of your home?', type:'currency', key:['realEstate','primaryValue'], placeholder:'400000' });
+    q.push({ id:'realEstate.mortgageBalance',section:5,sectionName:'Real Estate',label:'Remaining mortgage balance?', type:'currency', key:['realEstate','mortgageBalance'], placeholder:'300000', optional:true });
+    q.push({ id:'realEstate.mortgageRate',section:5,sectionName:'Real Estate',  label:'Mortgage interest rate (%)?', type:'number', key:['realEstate','mortgageRate'], min:0, max:20, step:0.125, placeholder:'6.5', optional:true });
+  }
+
+  // SECTION 6: Debts
+  q.push({ id:'debts.studentLoanBalance',section:6,sectionName:'Debts',label:'Student loan balance (0 if none)?', type:'currency', key:['debts','studentLoanBalance'], placeholder:'0', optional:true });
+  q.push({ id:'debts.studentLoanRate',section:6,sectionName:'Debts',  label:'Student loan interest rate (%)?', type:'number', key:['debts','studentLoanRate'], min:0, max:20, placeholder:'6.5', optional:true });
+  q.push({ id:'debts.autoBalance',section:6,sectionName:'Debts',      label:'Auto loan balance (0 if none)?', type:'currency', key:['debts','autoBalance'], placeholder:'0', optional:true });
+  q.push({ id:'debts.creditCardBalance',section:6,sectionName:'Debts',label:'Credit card balance carried month-to-month (0 if paid in full)?', type:'currency', key:['debts','creditCardBalance'], placeholder:'0', optional:true });
+
+  // SECTION 7: Life Events
+  q.push({ id:'lifeEvents.select',section:7,sectionName:'Life Events & Goals',label:'Which major life events are you planning for? (Select all that apply)', type:'multicheckbox', key:['lifeEvents'], options:LIFE_EVENT_OPTIONS });
+
+  // SECTION 8: Retirement Vision
+  q.push({ id:'retirementVision.targetRetirementAge',section:8,sectionName:'Retirement Vision',label:'At what age do you want to retire?', type:'slider', key:['retirementVision','targetRetirementAge'], min:40, max:80, step:1, defaultVal:65 });
+  q.push({ id:'retirementVision.desiredAnnualSpend',section:8,sectionName:'Retirement Vision',label:"Annual spending in retirement (today's dollars)?", type:'currency', key:['retirementVision','desiredAnnualSpend'], placeholder:'80000' });
+  q.push({ id:'retirementVision.legacyGoal',section:8,sectionName:'Retirement Vision',label:'Legacy / estate goal?', type:'select', key:['retirementVision','legacyGoal'],
+    options:[{v:'none',l:'Spend it all'},{v:'modest',l:'Leave something for heirs'},{v:'significant',l:'Significant wealth transfer'},{v:'charity',l:'Charitable giving focus'}], optional:true });
+  q.push({ id:'retirementVision.relocate',section:8,sectionName:'Retirement Vision',label:'Do you plan to relocate in retirement?', type:'select', key:['retirementVision','relocate'],
+    options:[{v:'no',l:'No — staying put'},{v:'yes_lower',l:'Yes — lower cost of living state'},{v:'yes_higher',l:'Yes — higher cost of living'},{v:'international',l:'International'}], optional:true });
+
+  // SECTION 9: Risk
+  q.push({ id:'risk.riskTolerance',section:9,sectionName:'Risk & Preferences',label:'Investment risk tolerance? (1 = very conservative, 5 = very aggressive)', type:'slider', key:['risk','riskTolerance'], min:1, max:5, step:1, defaultVal:3 });
+  q.push({ id:'risk.investPhilosophy',section:9,sectionName:'Risk & Preferences',label:'Investment approach?', type:'select', key:['risk','investPhilosophy'],
+    options:[{v:'passive',l:'Passive index funds'},{v:'active',l:'Active management'},{v:'mixed',l:'Mixed approach'}] });
+
+  // SECTION 10: Estate
+  q.push({ id:'estate.hasWill',section:10,sectionName:'Estate Basics',label:'Do you have a will?', type:'select', key:['estate','hasWill'],
+    options:[{v:'yes',l:'Yes, up to date'},{v:'outdated',l:'Yes, but outdated'},{v:'no',l:'No'}] });
+  q.push({ id:'estate.hasTrust',section:10,sectionName:'Estate Basics',label:'Do you have a trust?', type:'select', key:['estate','hasTrust'],
+    options:[{v:'yes',l:'Yes'},{v:'no',l:'No'},{v:'considering',l:'Considering it'}], optional:true });
+  q.push({ id:'estate.lifeInsurance',section:10,sectionName:'Estate Basics',label:'Life insurance death benefit total?', type:'currency', key:['estate','lifeInsurance'], placeholder:'0', optional:true });
+  q.push({ id:'estate.disabilityIns',section:10,sectionName:'Estate Basics',label:'Do you have disability insurance?', type:'select', key:['estate','disabilityIns'],
+    options:[{v:'yes_employer',l:'Yes — through employer'},{v:'yes_private',l:'Yes — private policy'},{v:'no',l:'No'}], optional:true });
+
+  return q;
+}
+
+const NUM_SECTIONS = 11;
+
+// ============================================================
+// SECTION: STATE MANAGEMENT
+// ============================================================
+
+function loadPlan() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return null;
+}
+
+function savePlan(plan) {
+  try {
+    plan.meta.updatedAt = new Date().toISOString();
+    localStorage.setItem(LS_KEY, JSON.stringify(plan));
+  } catch(e) {}
+}
+
+function getApiKey() {
+  return localStorage.getItem(LS_APIKEY) || '';
+}
+function setApiKey(k) {
+  if (k) localStorage.setItem(LS_APIKEY, k);
+  else localStorage.removeItem(LS_APIKEY);
+}
+
+function setNestedValue(obj, keys, value) {
+  const result = JSON.parse(JSON.stringify(obj));
+  let cur = result;
+  for (let i = 0; i < keys.length - 1; i++) {
+    if (!cur[keys[i]]) cur[keys[i]] = {};
+    cur = cur[keys[i]];
+  }
+  cur[keys[keys.length - 1]] = value;
+  return result;
+}
+
+function getNestedValue(obj, keys) {
+  let cur = obj;
+  for (const k of keys) {
+    if (cur == null) return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
+
+// ============================================================
+// SECTION: COMPONENTS - UI PRIMITIVES
+// ============================================================
+
+function Card({ children, className='' }) {
+  return html`<div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 ${className}">${children}</div>`;
+}
+
+function Badge({ type, children }) {
+  const colors = { warning:'bg-amber-50 text-amber-800 border-amber-200', success:'bg-green-50 text-green-800 border-green-200', info:'bg-blue-50 text-blue-800 border-blue-200', opportunity:'bg-indigo-50 text-indigo-800 border-indigo-200' };
+  const icons = { warning:'⚠️', success:'✓', info:'ℹ️', opportunity:'💡' };
+  return html`<div class="flex gap-2 p-3 rounded-lg border text-sm ${colors[type]||colors.info}">
+    <span>${icons[type]||'•'}</span>
+    <span>${children}</span>
+  </div>`;
+}
+
+function StatCard({ label, value, sub, color='indigo' }) {
+  const c = { indigo:'text-indigo-600', green:'text-green-600', amber:'text-amber-600', red:'text-red-600' };
+  return html`<div class="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+    <p class="text-xs font-medium text-gray-500 uppercase tracking-wide">${label}</p>
+    <p class="text-2xl font-bold mt-1 ${c[color]||c.indigo}">${value}</p>
+    ${sub && html`<p class="text-xs text-gray-400 mt-1">${sub}</p>`}
+  </div>`;
+}
+
+function Slider({ label, value, min, max, step=1, onChange, format=(v)=>v, help }) {
+  return html`<div class="space-y-1">
+    <div class="flex justify-between items-center">
+      <label class="text-sm font-medium text-gray-700">${label}</label>
+      <span class="text-sm font-semibold text-indigo-600">${format(value)}</span>
+    </div>
+    <input type="range" class="w-full" min=${min} max=${max} step=${step} value=${value}
+      onChange=${e => onChange(Number(e.target.value))} />
+    ${help && html`<p class="text-xs text-gray-400">${help}</p>`}
+  </div>`;
+}
+
+// ============================================================
+// SECTION: COMPONENTS - LANDING
+// ============================================================
+
+function Landing({ onStart, onImport }) {
+  const fileRef = useRef(null);
+  function handleFile(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const plan = JSON.parse(ev.target.result);
+        onImport(plan);
+      } catch(err) {
+        alert('Invalid JSON file. Please export a valid plan first.');
+      }
+    };
+    reader.readAsText(f);
+  }
+
+  return html`
+    <div class="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-blue-50 flex items-center justify-center p-4">
+      <div class="max-w-lg w-full">
+        <div class="text-center mb-8">
+          <div class="inline-flex items-center justify-center w-16 h-16 bg-indigo-600 rounded-2xl mb-4">
+            <span class="text-3xl">⚖️</span>
+          </div>
+          <h1 class="text-3xl font-bold text-gray-900">FiduciaryPlan</h1>
+          <p class="mt-3 text-gray-600 text-lg leading-relaxed">
+            A personal financial planner that builds an interactive model from your answers.
+            Nothing is stored anywhere but your browser.
+          </p>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-lg border border-gray-100 p-8 space-y-4">
+          <button onClick=${onStart}
+            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-4 px-6 rounded-xl transition-colors text-lg">
+            Start fresh →
+          </button>
+          <button onClick=${() => fileRef.current.click()}
+            class="w-full bg-white hover:bg-gray-50 text-gray-700 font-semibold py-4 px-6 rounded-xl border-2 border-gray-200 transition-colors">
+            Import saved plan (JSON)
+          </button>
+          <input ref=${fileRef} type="file" accept=".json" class="hidden" onChange=${handleFile} />
+        </div>
+
+        <div class="mt-6 space-y-2 text-center">
+          <p class="text-xs text-gray-400">
+            🔒 All data stays in your browser. No accounts. No tracking. No servers.
+          </p>
+          <p class="text-xs text-gray-400">
+            Not financial advice. Educational modeling tool. You own your data.
+          </p>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// SECTION: COMPONENTS - INTAKE ENGINE
+// ============================================================
+
+function IntakeEngine({ plan, onUpdate, onComplete }) {
+  const [localVal, setLocalVal] = useState('');
+  const [error, setError] = useState('');
+  const [lifeEventDetails, setLifeEventDetails] = useState({});
+  const [lifeEventStep, setLifeEventStep] = useState(null); // null or event name
+
+  const questions = useMemo(() => buildQuestions(plan.intake), [
+    plan.intake.basics?.filingStatus,
+    plan.intake.realEstate?.ownOrRent,
+  ]);
+
+  const progress = plan.intakeProgress;
+  const qIdx = progress.currentQuestion;
+  const currentQ = questions[qIdx];
+
+  useEffect(() => {
+    if (!currentQ) return;
+    const existing = getNestedValue(plan.intake, currentQ.key);
+    if (existing !== undefined && existing !== null && existing !== '') {
+      setLocalVal(String(existing));
+    } else if (currentQ.type === 'slider') {
+      setLocalVal(String(currentQ.defaultVal ?? currentQ.min));
+    } else {
+      setLocalVal('');
+    }
+    setError('');
+  }, [qIdx]);
+
+  function advance(value) {
+    // Save answer
+    const newIntake = currentQ.key[0] === 'lifeEvents'
+      ? { ...plan.intake, lifeEvents: value }
+      : setNestedValue(plan.intake, currentQ.key, value);
+
+    const nextIdx = qIdx + 1;
+    if (nextIdx >= questions.length) {
+      onUpdate({ ...plan, intake: newIntake, intakeProgress: { ...progress, currentQuestion: nextIdx, completed: true } });
+      onComplete();
+    } else {
+      onUpdate({ ...plan, intake: newIntake, intakeProgress: { ...progress, currentQuestion: nextIdx } });
+    }
+  }
+
+  function handleSubmit() {
+    if (!currentQ) return;
+    const val = localVal;
+    if (!currentQ.optional && (val === '' || val === null || val === undefined)) {
+      setError('This question is required. Enter a value or click Skip.');
+      return;
+    }
+    setError('');
+    let parsed = val;
+    if (currentQ.type === 'number' || currentQ.type === 'currency' || currentQ.type === 'slider') {
+      parsed = Number(val) || 0;
+    }
+    advance(parsed);
+  }
+
+  function handleSkip() {
+    advance(currentQ.type === 'slider' ? Number(currentQ.defaultVal ?? currentQ.min) : null);
+  }
+
+  function handleBack() {
+    if (qIdx > 0) {
+      onUpdate({ ...plan, intakeProgress: { ...progress, currentQuestion: qIdx - 1 } });
+    }
+  }
+
+  const sectionName = currentQ?.sectionName || '';
+  const sectionNum = currentQ?.section ?? 0;
+  const pct = Math.round((qIdx / Math.max(questions.length - 1, 1)) * 100);
+
+  if (!currentQ) return null;
+
+  // Life event multi-select
+  if (currentQ.type === 'multicheckbox') {
+    const selected = plan.intake.lifeEvents || [];
+    return html`
+      <div class="min-h-screen bg-gray-50 flex flex-col">
+        ${IntakeHeader({ sectionNum, sectionName, pct, numSections: NUM_SECTIONS })}
+        <div class="flex-1 flex items-start justify-center p-4 pt-8">
+          <div class="w-full max-w-2xl">
+            <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+              <h2 class="text-xl font-semibold text-gray-900 mb-6">${currentQ.label}</h2>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-6">
+                ${currentQ.options.map(opt => {
+                  const isSelected = selected.some(e => e.type === opt);
+                  return html`<button key=${opt}
+                    onClick=${() => {
+                      let next;
+                      if (isSelected) next = selected.filter(e => e.type !== opt);
+                      else next = [...selected, { type: opt, targetYear: new Date().getFullYear() + 5, estimatedCost: 0, priority: 'want' }];
+                      onUpdate({ ...plan, intake: { ...plan.intake, lifeEvents: next } });
+                    }}
+                    class="flex items-center gap-2 p-3 rounded-lg border-2 text-left transition-colors ${isSelected ? 'border-indigo-500 bg-indigo-50 text-indigo-900' : 'border-gray-200 hover:border-gray-300'}">
+                    <span class="text-lg">${isSelected ? '☑' : '☐'}</span>
+                    <span class="text-sm font-medium">${opt}</span>
+                  </button>`;
+                })}
+              </div>
+              <div class="flex gap-3">
+                <button onClick=${handleBack} class="px-4 py-2 text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 text-sm">← Back</button>
+                <button onClick=${() => advance(selected)} class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl transition-colors">
+                  Continue →
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  return html`
+    <div class="min-h-screen bg-gray-50 flex flex-col">
+      ${IntakeHeader({ sectionNum, sectionName, pct, numSections: NUM_SECTIONS })}
+      <div class="flex-1 flex items-start justify-center p-4 pt-8">
+        <div class="w-full max-w-xl">
+          <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+            <h2 class="text-xl font-semibold text-gray-900 mb-2">${currentQ.label}</h2>
+            ${currentQ.help && html`<p class="text-sm text-gray-500 mb-4">${currentQ.help}</p>`}
+
+            <div class="mb-6 mt-4">
+              ${currentQ.type === 'text' && html`
+                <input type="text" class="w-full border border-gray-200 rounded-xl px-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  placeholder=${currentQ.placeholder||''} value=${localVal}
+                  onInput=${e => setLocalVal(e.target.value)}
+                  onKeyDown=${e => e.key === 'Enter' && handleSubmit()} autoFocus />`}
+
+              ${currentQ.type === 'number' && html`
+                <input type="number" class="w-full border border-gray-200 rounded-xl px-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  placeholder=${currentQ.placeholder||''} value=${localVal} min=${currentQ.min} max=${currentQ.max} step=${currentQ.step||1}
+                  onInput=${e => setLocalVal(e.target.value)}
+                  onKeyDown=${e => e.key === 'Enter' && handleSubmit()} autoFocus />`}
+
+              ${currentQ.type === 'currency' && html`
+                <div class="relative">
+                  <span class="absolute left-4 top-3 text-lg text-gray-500">$</span>
+                  <input type="number" class="w-full border border-gray-200 rounded-xl pl-8 pr-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    placeholder=${currentQ.placeholder||'0'} value=${localVal} min="0"
+                    onInput=${e => setLocalVal(e.target.value)}
+                    onKeyDown=${e => e.key === 'Enter' && handleSubmit()} autoFocus />
+                </div>`}
+
+              ${currentQ.type === 'select' && html`
+                <div class="space-y-2">
+                  ${currentQ.options.map(opt => html`
+                    <button key=${opt.v}
+                      onClick=${() => { setLocalVal(opt.v); setTimeout(() => advance(opt.v), 150); }}
+                      class="w-full text-left px-4 py-3 rounded-xl border-2 transition-colors ${localVal === opt.v ? 'border-indigo-500 bg-indigo-50 text-indigo-900 font-semibold' : 'border-gray-200 hover:border-indigo-300'}">
+                      ${opt.l}
+                    </button>`)}
+                </div>`}
+
+              ${currentQ.type === 'state' && html`
+                <select class="w-full border border-gray-200 rounded-xl px-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  value=${localVal} onChange=${e => setLocalVal(e.target.value)} autoFocus>
+                  <option value="">Select state…</option>
+                  ${US_STATES.map(s => html`<option key=${s} value=${s}>${s}</option>`)}
+                </select>`}
+
+              ${currentQ.type === 'slider' && html`
+                <div class="space-y-4 pt-2">
+                  <div class="flex justify-between text-sm text-gray-500">
+                    <span>${currentQ.min}${currentQ.id.includes('Rate') || currentQ.id.includes('Pct') || currentQ.id.includes('Tolerance') ? '' : ''}</span>
+                    <span class="text-2xl font-bold text-indigo-600">${localVal}${currentQ.id.includes('Rate') || currentQ.id.includes('Pct') ? '%' : ''}</span>
+                    <span>${currentQ.max}</span>
+                  </div>
+                  <input type="range" class="w-full" min=${currentQ.min} max=${currentQ.max} step=${currentQ.step||1} value=${localVal}
+                    onInput=${e => setLocalVal(e.target.value)} />
+                </div>`}
+            </div>
+
+            ${error && html`<p class="text-red-500 text-sm mb-4">${error}</p>`}
+
+            <div class="flex gap-3">
+              ${qIdx > 0 && html`<button onClick=${handleBack} class="px-4 py-2 text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 text-sm">← Back</button>`}
+              ${currentQ.type !== 'select' && html`
+                <button onClick=${handleSubmit} class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl transition-colors">
+                  Continue →
+                </button>`}
+              ${currentQ.optional && currentQ.type !== 'select' && html`
+                <button onClick=${handleSkip} class="px-4 py-2 text-gray-400 hover:text-gray-600 text-sm">Skip</button>`}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function IntakeHeader({ sectionNum, sectionName, pct, numSections }) {
+  return html`
+    <div class="bg-white border-b border-gray-100 px-6 py-4">
+      <div class="max-w-2xl mx-auto">
+        <div class="flex justify-between items-center mb-2">
+          <span class="text-sm font-medium text-gray-600">Section ${sectionNum + 1} of ${numSections}: ${sectionName}</span>
+          <span class="text-sm text-gray-400">${pct}% complete</span>
+        </div>
+        <div class="w-full bg-gray-100 rounded-full h-2">
+          <div class="bg-indigo-600 h-2 rounded-full transition-all duration-300" style="width: ${pct}%"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// SECTION: COMPONENTS - DASHBOARD
+// ============================================================
+
+const TABS = ['Snapshot','Portfolio','Tax','Retirement','Life Events','Estate','Advisor'];
+
+function Dashboard({ plan, onUpdate, apiKey, onOpenSettings }) {
+  const [activeTab, setActiveTab] = useState(0);
+  const nw = useMemo(() => calcNetWorth(plan.intake), [plan.intake]);
+  const cf = useMemo(() => calcCashFlow(plan.intake), [plan.intake]);
+  const obs = useMemo(() => generateObservations(plan.intake, plan.assumptions), [plan.intake, plan.assumptions]);
+
+  return html`
+    <div class="min-h-screen bg-gray-50 flex flex-col">
+      <!-- Header -->
+      <div class="bg-white border-b border-gray-200 px-4 py-3">
+        <div class="max-w-7xl mx-auto flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-xl">⚖️</span>
+            <span class="font-bold text-gray-900">FiduciaryPlan</span>
+            ${plan.intake.basics?.name && html`<span class="text-gray-400">— ${plan.intake.basics.name}</span>`}
+          </div>
+          <button onClick=${onOpenSettings} class="text-sm text-gray-500 hover:text-gray-700 border border-gray-200 px-3 py-1.5 rounded-lg">⚙ Settings</button>
+        </div>
+      </div>
+
+      <!-- Tab Nav -->
+      <div class="bg-white border-b border-gray-200 overflow-x-auto">
+        <div class="max-w-7xl mx-auto flex">
+          ${TABS.map((t, i) => html`
+            <button key=${t} onClick=${() => setActiveTab(i)}
+              class="px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors ${activeTab === i ? 'tab-active text-indigo-600' : 'text-gray-500 hover:text-gray-700'}">
+              ${t}
+            </button>`)}
+        </div>
+      </div>
+
+      <!-- Tab Content -->
+      <div class="flex-1 overflow-y-auto">
+        <div class="max-w-7xl mx-auto p-6">
+          ${activeTab === 0 && html`<${Tab1Snapshot} nw=${nw} cf=${cf} obs=${obs} plan=${plan} />`}
+          ${activeTab === 1 && html`<${Tab2Portfolio} plan=${plan} onUpdate=${onUpdate} />`}
+          ${activeTab === 2 && html`<${Tab3Tax} plan=${plan} />`}
+          ${activeTab === 3 && html`<${Tab4Retirement} plan=${plan} onUpdate=${onUpdate} />`}
+          ${activeTab === 4 && html`<${Tab5LifeEvents} plan=${plan} />`}
+          ${activeTab === 5 && html`<${Tab6Estate} plan=${plan} />`}
+          ${activeTab === 6 && html`<${Tab7Advisor} plan=${plan} apiKey=${apiKey} />`}
+        </div>
+      </div>
+
+      <footer class="bg-white border-t border-gray-100 py-3 text-center text-xs text-gray-400">
+        Educational modeling tool. Not financial advice. All data stored locally in your browser only.
+      </footer>
+    </div>`;
+}
+
+// --- TAB 1: SNAPSHOT ---
+function Tab1Snapshot({ nw, cf, obs, plan }) {
+  const em = calcEmergencyMonths(plan.intake);
+  const dti = cf.gross > 0 ? cf.annualDebtPmts / cf.gross : 0;
+
+  const waterfallData = [
+    { name:'Retirement', value: (Number(plan.intake.retirement?.k401Balance)||0)+(Number(plan.intake.retirement?.k401Roth)||0)+(Number(plan.intake.retirement?.iraBalance)||0)+(Number(plan.intake.retirement?.rothIraBalance)||0), fill:'#4f46e5' },
+    { name:'Brokerage', value: Number(plan.intake.investments?.brokerageBalance)||0, fill:'#7c3aed' },
+    { name:'Real Estate', value: Number(plan.intake.realEstate?.primaryValue)||0, fill:'#0891b2' },
+    { name:'Cash', value: (Number(plan.intake.cash?.checking)||0)+(Number(plan.intake.cash?.savings)||0), fill:'#059669' },
+    { name:'Debts', value: -(nw.totalLiab), fill:'#dc2626' },
+  ].filter(d => d.value !== 0);
+
+  const cashFlowData = [
+    { name:'Gross Income', value:cf.gross, fill:'#4f46e5' },
+    { name:'Federal Tax', value:-cf.taxes.federal, fill:'#ef4444' },
+    { name:'FICA', value:-cf.taxes.fica, fill:'#f97316' },
+    { name:'State Tax', value:-cf.taxes.stateTax, fill:'#eab308' },
+    { name:'Retirement', value:-cf.k401Contrib, fill:'#8b5cf6' },
+    { name:'Debt Pmts', value:-cf.annualDebtPmts, fill:'#ec4899' },
+    { name:'Take-Home', value:cf.discretionary, fill:'#10b981' },
+  ].filter(d => Math.abs(d.value) > 0);
+
+  return html`
+    <div class="space-y-6">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Financial Snapshot</h1>
+        <p class="text-gray-500 mt-1">Your complete financial picture at a glance.</p>
+      </div>
+
+      <!-- Key Stats -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <${StatCard} label="Net Worth" value=${fmtCurrency(nw.netWorth)} sub=${`Assets ${fmtCurrency(nw.totalAssets)}`} color=${nw.netWorth >= 0 ? 'indigo' : 'red'} />
+        <${StatCard} label="Savings Rate" value=${fmtPct(cf.savingsRate)} sub=${`${fmtCurrency(cf.k401Contrib + cf.investContrib)}/yr`} color=${cf.savingsRate >= 0.15 ? 'green' : 'amber'} />
+        <${StatCard} label="Emergency Fund" value=${em.toFixed(1) + ' mo'} sub=${`$${fmt(Number(plan.intake.cash?.checking||0) + Number(plan.intake.cash?.savings||0))} liquid`} color=${em >= 3 ? 'green' : 'amber'} />
+        <${StatCard} label="Debt-to-Income" value=${fmtPct(dti)} sub="Annual debt / gross income" color=${dti < 0.15 ? 'green' : dti < 0.36 ? 'amber' : 'red'} />
+      </div>
+
+      <!-- Charts Row -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-4">Asset & Liability Breakdown</h3>
+          <${ResponsiveContainer} width="100%" height=${240}>
+            <${BarChart} data=${waterfallData} layout="vertical">
+              <${XAxis} type="number" tickFormatter=${v => '$' + (v/1000).toFixed(0)+'k'} />
+              <${YAxis} type="category" dataKey="name" width=${90} tick=${{fontSize:12}} />
+              <${Tooltip} formatter=${(v) => fmtCurrency(Math.abs(v))} />
+              <${Bar} dataKey="value" radius=${[0,4,4,0]}>
+                ${waterfallData.map((d,i) => html`<${Cell} key=${i} fill=${d.fill} />`)}
+              </${Bar}>
+            </${BarChart}>
+          </${ResponsiveContainer}>
+        </${Card}>
+
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-4">Annual Cash Flow</h3>
+          <${ResponsiveContainer} width="100%" height=${240}>
+            <${BarChart} data=${cashFlowData} layout="vertical">
+              <${XAxis} type="number" tickFormatter=${v => '$' + (v/1000).toFixed(0)+'k'} />
+              <${YAxis} type="category" dataKey="name" width=${90} tick=${{fontSize:11}} />
+              <${Tooltip} formatter=${(v) => fmtCurrency(Math.abs(v))} />
+              <${Bar} dataKey="value" radius=${[0,4,4,0]}>
+                ${cashFlowData.map((d,i) => html`<${Cell} key=${i} fill=${d.fill} />`)}
+              </${Bar}>
+            </${BarChart}>
+          </${ResponsiveContainer}>
+        </${Card}>
+      </div>
+
+      <!-- Observations -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-4">Fiduciary Observations</h3>
+        <div class="space-y-3">
+          ${obs.length === 0 && html`<p class="text-gray-400 text-sm">Complete more of the intake to see personalized observations.</p>`}
+          ${obs.map((o,i) => html`<${Badge} key=${i} type=${o.type}>${o.text}</${Badge}>`)}
+        </div>
+      </${Card}>
+    </div>`;
+}
+
+// --- TAB 2: PORTFOLIO PROJECTION ---
+function Tab2Portfolio({ plan, onUpdate }) {
+  const [equityReturn, setEquityReturn] = useState(Math.round(plan.assumptions.equityReturn * 100));
+  const [inflRate, setInflRate] = useState(Math.round(plan.assumptions.inflation * 100));
+  const [retireAge, setRetireAge] = useState(Number(plan.intake.retirementVision?.targetRetirementAge) || 65);
+
+  const age = Number(plan.intake.basics?.age) || 35;
+
+  const assumptions = useMemo(() => ({
+    ...plan.assumptions,
+    equityReturn: equityReturn / 100,
+    inflation: inflRate / 100,
+  }), [equityReturn, inflRate, plan.assumptions]);
+
+  const baseData    = useMemo(() => calcProjection(plan.intake, assumptions,  0), [plan.intake, assumptions]);
+  const consData    = useMemo(() => calcProjection(plan.intake, assumptions, -0.02), [plan.intake, assumptions]);
+  const optimData   = useMemo(() => calcProjection(plan.intake, assumptions,  0.02), [plan.intake, assumptions]);
+
+  const chartData = baseData.map((d, i) => ({
+    age: d.age,
+    base: d.balance,
+    conservative: consData[i]?.balance ?? 0,
+    optimistic: optimData[i]?.balance ?? 0,
+  }));
+
+  const stockPct = Number(plan.intake.investments?.stockPct) || 70;
+  const allocData = [
+    { name:'Stocks', value: stockPct, color:'#4f46e5' },
+    { name:'Bonds',  value: 100-stockPct-5, color:'#0891b2' },
+    { name:'Cash',   value: 5, color:'#10b981' },
+  ];
+
+  return html`
+    <div class="space-y-6">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Portfolio Projection</h1>
+        <p class="text-gray-500 mt-1">Multi-scenario modeling. Every assumption is visible and editable.</p>
+      </div>
+
+      <!-- Sliders -->
+      <${Card} className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        <${Slider} label="Expected equity return" value=${equityReturn} min=${4} max=${14} format=${v => v+'%'} onChange=${setEquityReturn} help="Historical US equity avg ~9% nominal" />
+        <${Slider} label="Inflation assumption" value=${inflRate} min=${1} max=${8} format=${v => v+'%'} onChange=${setInflRate} help="Fed target 2%, current estimate 2.5%" />
+        <${Slider} label="Target retirement age" value=${retireAge} min=${40} max=${80} onChange=${setRetireAge} />
+      </${Card}>
+
+      <!-- Projection Chart -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-1">Portfolio Balance by Age</h3>
+        <p class="text-xs text-gray-400 mb-4">Conservative = base −2% return | Optimistic = base +2% return. Shaded band shows range.</p>
+        <${ResponsiveContainer} width="100%" height=${320}>
+          <${AreaChart} data=${chartData}>
+            <${CartesianGrid} strokeDasharray="3 3" stroke="#f0f0f0" />
+            <${XAxis} dataKey="age" label=${{value:'Age', position:'insideBottom', offset:-5}} />
+            <${YAxis} tickFormatter=${v => '$'+(v/1000000).toFixed(1)+'M'} width=${70} />
+            <${Tooltip} formatter=${(v,n) => [fmtCurrency(v), n.charAt(0).toUpperCase()+n.slice(1)]} labelFormatter=${v => 'Age '+v} />
+            <${Legend} />
+            <${Area} type="monotone" dataKey="conservative" stroke="#94a3b8" fill="#f1f5f9" name="Conservative" strokeDasharray="4 2" />
+            <${Area} type="monotone" dataKey="optimistic" stroke="#7c3aed" fill="#ede9fe" fillOpacity=${0.3} name="Optimistic" strokeDasharray="4 2" />
+            <${Area} type="monotone" dataKey="base" stroke="#4f46e5" fill="#e0e7ff" fillOpacity=${0.5} name="Base" strokeWidth=${2} />
+            <${ReferenceLine} x=${retireAge} stroke="#dc2626" strokeDasharray="6 2" label=${{value:'Retire', position:'top', fill:'#dc2626', fontSize:11}} />
+          </${AreaChart}>
+        </${ResponsiveContainer}>
+        <p class="text-xs text-gray-400 mt-2">⚠ Projections show ranges, not guaranteed outcomes. Actual results will vary.</p>
+      </${Card}>
+
+      <!-- Allocation -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-4">Asset Allocation</h3>
+          <${ResponsiveContainer} width="100%" height=${200}>
+            <${PieChart}>
+              <${Pie} data=${allocData} cx="50%" cy="50%" outerRadius=${80} dataKey="value" nameKey="name" label=${({ name, value }) => name+' '+value+'%'}>
+                ${allocData.map((d,i) => html`<${Cell} key=${i} fill=${d.color} />`)}
+              </${Pie}>
+              <${Tooltip} formatter=${(v) => v+'%'} />
+            </${PieChart}>
+          </${ResponsiveContainer}>
+        </${Card}>
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-4">Assumptions</h3>
+          <div class="space-y-2 text-sm">
+            ${[
+              ['Equity return (nominal)', equityReturn+'%'],
+              ['Inflation', inflRate+'%'],
+              ['Real equity return', (equityReturn-inflRate)+'%'],
+              ['Wage growth', (plan.assumptions.wageGrowth*100).toFixed(1)+'%'],
+              ['Life expectancy', plan.assumptions.lifeExpectancy+' years'],
+              ['Source', 'Damodaran historical, Fed target'],
+            ].map(([k,v]) => html`
+              <div class="flex justify-between py-1 border-b border-gray-50">
+                <span class="text-gray-500">${k}</span>
+                <span class="font-medium text-gray-800">${v}</span>
+              </div>`)}
+          </div>
+        </${Card}>
+      </div>
+    </div>`;
+}
+
+// --- TAB 3: TAX OPTIMIZATION ---
+function Tab3Tax({ plan }) {
+  const taxes = useMemo(() => calcTaxes(plan.intake), [plan.intake]);
+  const gross = taxes.gross;
+  const age = Number(plan.intake.basics?.age) || 35;
+  const fs = plan.intake.basics?.filingStatus || 'single';
+
+  const k401Used = taxes.k401Contrib;
+  const k401Limit = age >= 50 ? LIMITS.k401_catchup : LIMITS.k401;
+  const k401Remaining = Math.max(0, k401Limit - k401Used);
+
+  const iraLimit = age >= 50 ? LIMITS.ira_catchup : LIMITS.ira;
+  const iraUsed = 0; // user hasn't told us current IRA contributions
+  const hsaLimit = fs === 'mfj' ? LIMITS.hsa_family : LIMITS.hsa_single;
+
+  const backdoorEligible = (fs === 'mfj' && gross > 236000) || (fs !== 'mfj' && gross > 161000);
+  const rothConversionSpace = (() => {
+    const brackets = FED_BRACKETS[fs] || FED_BRACKETS.single;
+    const currentTaxable = taxes.taxableIncome;
+    const nextBracket = brackets.find(b => b.min > currentTaxable);
+    if (!nextBracket) return 0;
+    return nextBracket.min - currentTaxable;
+  })();
+
+  return html`
+    <div class="space-y-6">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Tax Optimization</h1>
+        <p class="text-gray-500 mt-1">Current tax position and highest-leverage opportunities.</p>
+      </div>
+
+      <!-- Tax Summary -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <${StatCard} label="Gross Income" value=${fmtCurrency(gross)} />
+        <${StatCard} label="Total Tax Burden" value=${fmtCurrency(taxes.totalTax)} sub=${fmtCurrency(taxes.federal)+' fed + '+fmtCurrency(taxes.fica)+' FICA'} color="red" />
+        <${StatCard} label="Effective Rate" value=${fmtPct(taxes.effectiveRate)} sub="Total tax / gross income" color=${taxes.effectiveRate > 0.30 ? 'red' : 'amber'} />
+        <${StatCard} label="Marginal Rate" value=${fmtPct(taxes.marginalRate)} sub="Federal marginal bracket" color="indigo" />
+      </div>
+
+      <!-- Tax-Advantaged Headroom -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-4">Tax-Advantaged Contribution Headroom (2026)</h3>
+        <div class="space-y-4">
+          ${[
+            { label:'401(k) Employee', used:k401Used, limit:k401Limit, note: age>=50 ? 'Catch-up eligible' : 'Limit: $23,500' },
+            { label:'IRA (Traditional or Roth)', used:iraUsed, limit:iraLimit, note:'Limit: $7,000 ($8,000 age 50+)' },
+            { label:'HSA', used:0, limit:hsaLimit, note:`Limit: $${fmt(hsaLimit)} (${fs==='mfj'?'family':'single'})` },
+          ].map(({ label, used, limit, note }) => {
+            const pct = limit > 0 ? Math.min(100, (used/limit)*100) : 0;
+            const remaining = Math.max(0, limit - used);
+            return html`
+              <div key=${label}>
+                <div class="flex justify-between text-sm mb-1">
+                  <span class="font-medium text-gray-700">${label}</span>
+                  <span class="text-gray-500">${fmtCurrency(used)} / ${fmtCurrency(limit)} — <span class="text-indigo-600 font-semibold">${fmtCurrency(remaining)} remaining</span></span>
+                </div>
+                <div class="w-full bg-gray-100 rounded-full h-2">
+                  <div class="bg-indigo-500 h-2 rounded-full" style="width:${pct}%"></div>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">${note}</p>
+              </div>`;
+          })}
+        </div>
+      </${Card}>
+
+      <!-- Roth Opportunities -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-3">Roth Conversion Opportunity</h3>
+          <p class="text-sm text-gray-600 mb-3">
+            You're currently in the <strong>${fmtPct(taxes.marginalRate)}</strong> federal bracket.
+            You can convert up to <strong>${fmtCurrency(rothConversionSpace)}</strong> before crossing into the next bracket.
+          </p>
+          <p class="text-xs text-gray-400">
+            Roth conversions pay tax now at ${fmtPct(taxes.marginalRate)} in exchange for tax-free growth. Best years: low-income years, early retirement before RMDs or SS starts.
+          </p>
+          ${rothConversionSpace > 0 && html`
+            <div class="mt-3 p-3 bg-indigo-50 rounded-lg text-sm text-indigo-800">
+              💡 Converting ${fmtCurrency(rothConversionSpace)} this year would cost ~${fmtCurrency(rothConversionSpace * taxes.marginalRate)} in additional federal tax today.
+            </div>`}
+        </${Card}>
+
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-3">Backdoor & Mega Backdoor Roth</h3>
+          <div class="space-y-3 text-sm">
+            <div class="flex items-start gap-2">
+              <span>${backdoorEligible ? '✅' : '⬜'}</span>
+              <div>
+                <p class="font-medium text-gray-700">Backdoor Roth IRA</p>
+                <p class="text-gray-500">${backdoorEligible ? 'Income too high for direct Roth contribution — backdoor is your path.' : 'You may be eligible for a direct Roth IRA contribution.'}</p>
+              </div>
+            </div>
+            <div class="flex items-start gap-2">
+              <span>❓</span>
+              <div>
+                <p class="font-medium text-gray-700">Mega Backdoor Roth</p>
+                <p class="text-gray-500">Requires after-tax 401(k) + in-plan conversion or in-service rollover. Verify with your plan documents. <span class="text-indigo-600">// PROD: integrate plan document check</span></p>
+              </div>
+            </div>
+          </div>
+        </${Card}>
+      </div>
+
+      <!-- State Tax Note -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-2">State Tax: ${plan.intake.basics?.state || 'N/A'}</h3>
+        <p class="text-sm text-gray-600">Estimated state income tax: <strong>${fmtCurrency(taxes.stateTax)}</strong> ({${fmtPct(gross > 0 ? taxes.stateTax/gross : 0)}} effective rate). This is a simplified estimate — actual liability depends on deductions, credits, and state-specific rules.</p>
+        ${STATE_TAX[plan.intake.basics?.state]?.rate === 0 && html`<p class="text-sm text-green-700 mt-2">✅ ${plan.intake.basics?.state} has no state income tax.</p>`}
+      </${Card}>
+    </div>`;
+}
+
+// --- TAB 4: RETIREMENT READINESS ---
+function Tab4Retirement({ plan, onUpdate }) {
+  const [retireAge, setRetireAge] = useState(Number(plan.intake.retirementVision?.targetRetirementAge) || 65);
+  const [spendAdj, setSpendAdj] = useState(0);
+
+  const modifiedIntake = useMemo(() => ({
+    ...plan.intake,
+    retirementVision: { ...plan.intake.retirementVision, targetRetirementAge: retireAge }
+  }), [plan.intake, retireAge]);
+
+  const rr = useMemo(() => calcRetirementReadiness(modifiedIntake, plan.assumptions), [modifiedIntake, plan.assumptions]);
+  const projection = useMemo(() => calcProjection(modifiedIntake, plan.assumptions, 0), [modifiedIntake, plan.assumptions]);
+  const mc = useMemo(() => runMonteCarlo(modifiedIntake, plan.assumptions), [modifiedIntake, plan.assumptions]);
+
+  const age = Number(plan.intake.basics?.age) || 35;
+  const desiredSpend = (Number(plan.intake.retirementVision?.desiredAnnualSpend) || (Number(plan.intake.income?.grossIncome)||0)*0.7) * (1 + spendAdj/100);
+
+  return html`
+    <div class="space-y-6">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Retirement Readiness</h1>
+        <p class="text-gray-500 mt-1">Accumulation, bridge period, drawdown, and success probability.</p>
+      </div>
+
+      <${Card} className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+        <${Slider} label="Target retirement age" value=${retireAge} min=${40} max=${80} onChange=${setRetireAge} />
+        <${Slider} label="Spending adjustment" value=${spendAdj} min=${-30} max=${50} format=${v => (v>=0?'+':'')+v+'%'} onChange=${setSpendAdj} help="Adjust desired retirement spending" />
+      </${Card}>
+
+      <!-- Key Readiness Stats -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <${StatCard} label="Portfolio at Retirement" value=${fmtCurrency(rr.retireBalance)} sub=${`Age ${retireAge}`} color="indigo" />
+        <${StatCard} label="Portfolio Income (4%)" value=${fmtCurrency(rr.portfolioIncome)} sub="Annual safe withdrawal" color="indigo" />
+        <${StatCard} label="Social Security Est." value=${'$'+fmt(rr.ssMonthly)+'/mo'} sub="At age 67 (FRA estimate)" color="green" />
+        <${StatCard} label="Success Probability" value=${rr.successRate+'%'} sub=${rr.gap > 0 ? `Gap: ${fmtCurrency(rr.gap)}/yr` : 'Projected surplus'} color=${rr.successRate>=80?'green':rr.successRate>=60?'amber':'red'} />
+      </div>
+
+      <!-- Bridge Period -->
+      ${rr.bridgeYears > 0 && html`
+        <${Card} className="border-amber-200 bg-amber-50">
+          <h3 class="text-base font-semibold text-amber-900 mb-2">⚠ Bridge Period: ${rr.bridgeYears} Years</h3>
+          <p class="text-sm text-amber-800">
+            Retiring at ${retireAge} means <strong>${rr.bridgeYears} years</strong> before Social Security (age ${plan.assumptions.ssAge}) and before Medicare (age 65).
+            You'll need to fund healthcare and income from portfolio only during this period.
+            Bridge income needed: ~<strong>${fmtCurrency(desiredSpend - (retireAge < 65 ? 0 : rr.ssAnnual))}/yr</strong>.
+          </p>
+        </${Card}>`}
+
+      <!-- Projection Chart -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-1">Portfolio Over Time</h3>
+        <${ResponsiveContainer} width="100%" height=${300}>
+          <${AreaChart} data=${projection}>
+            <${CartesianGrid} strokeDasharray="3 3" stroke="#f0f0f0" />
+            <${XAxis} dataKey="age" label=${{value:'Age',position:'insideBottom',offset:-5}} />
+            <${YAxis} tickFormatter=${v => '$'+(v/1000000).toFixed(1)+'M'} width=${70} />
+            <${Tooltip} formatter=${v => fmtCurrency(v)} labelFormatter=${v => 'Age '+v} />
+            <${Area} type="monotone" dataKey="balance" stroke="#4f46e5" fill="#e0e7ff" name="Portfolio Balance" />
+            <${ReferenceLine} x=${retireAge} stroke="#dc2626" strokeDasharray="6 2" label=${{value:'Retire',position:'top',fill:'#dc2626',fontSize:11}} />
+            <${ReferenceLine} x=${plan.assumptions.ssAge} stroke="#16a34a" strokeDasharray="6 2" label=${{value:'SS Starts',position:'top',fill:'#16a34a',fontSize:11}} />
+          </${AreaChart}>
+        </${ResponsiveContainer}>
+      </${Card}>
+
+      <!-- Monte Carlo -->
+      ${mc && html`
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-3">Monte Carlo at Retirement (${plan.assumptions.monteCarloRuns} runs)</h3>
+          <div class="grid grid-cols-5 gap-3 text-center">
+            ${[['10th pct', mc.p10,'red'],['25th pct',mc.p25,'amber'],['Median',mc.p50,'indigo'],['75th pct',mc.p75,'green'],['90th pct',mc.p90,'green']].map(([l,v,c])=>
+              html`<div key=${l} class="bg-gray-50 rounded-lg p-3">
+                <p class="text-xs text-gray-400 mb-1">${l}</p>
+                <p class="font-bold text-${c}-600 text-sm">${fmtCurrency(v)}</p>
+              </div>`)}
+          </div>
+          <p class="text-xs text-gray-400 mt-3">Assumes ${fmtPct(plan.assumptions.equityReturn)} avg return, 15% std deviation, ${fmtPct(plan.assumptions.inflation)} inflation. Range is wide — plan for the middle, stress-test the bottom.</p>
+        </${Card}>`}
+
+      <!-- Withdrawal Strategy -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-3">Recommended Withdrawal Sequence</h3>
+        <div class="space-y-2 text-sm">
+          ${[
+            ['1st', 'Taxable brokerage', 'Harvest losses, step up cost basis, control LTCG rate'],
+            ['2nd', 'Traditional 401(k) / IRA', 'Fill lower tax brackets; delay to manage RMD exposure'],
+            ['3rd', 'Roth IRA / Roth 401(k)', 'Last resort — tax-free growth extends longest'],
+          ].map(([order, acct, rationale]) => html`
+            <div key=${order} class="flex gap-3 p-3 rounded-lg bg-gray-50">
+              <span class="font-bold text-indigo-600 w-8">${order}</span>
+              <div>
+                <p class="font-medium text-gray-700">${acct}</p>
+                <p class="text-gray-500 text-xs">${rationale}</p>
+              </div>
+            </div>`)}
+        </div>
+      </${Card}>
+    </div>`;
+}
+
+// --- TAB 5: LIFE EVENTS ---
+function Tab5LifeEvents({ plan }) {
+  const events = plan.intake.lifeEvents || [];
+  const currentYear = new Date().getFullYear();
+  const retireBalance = calcRetirementReadiness(plan.intake, plan.assumptions).retireBalance;
+  const totalEventCost = events.reduce((s, e) => s + (Number(e.estimatedCost)||0), 0);
+
+  if (events.length === 0) {
+    return html`
+      <div class="space-y-6">
+        <h1 class="text-2xl font-bold text-gray-900">Life Events & Goals</h1>
+        <${Card}><p class="text-gray-400">No life events selected during intake. Go back to intake to add goals.</p></${Card}>
+      </div>`;
+  }
+
+  const sortedEvents = [...events].sort((a,b) => (a.targetYear||0) - (b.targetYear||0));
+
+  return html`
+    <div class="space-y-6">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Life Events & Goals</h1>
+        <p class="text-gray-500 mt-1">Timeline of planned goals and their impact on your retirement plan.</p>
+      </div>
+
+      <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <${StatCard} label="Total Goal Cost" value=${fmtCurrency(totalEventCost)} sub="${events.length} events planned" />
+        <${StatCard} label="Retirement Impact" value=${fmtCurrency(retireBalance - totalEventCost)} sub="Projected balance minus goals" color=${retireBalance - totalEventCost > 0 ? 'green' : 'red'} />
+      </div>
+
+      <!-- Timeline -->
+      <${Card}>
+        <h3 class="text-base font-semibold text-gray-900 mb-4">Goal Timeline</h3>
+        <div class="space-y-3">
+          ${sortedEvents.map((evt, i) => {
+            const yearsAway = (evt.targetYear || currentYear) - currentYear;
+            const monthlyNeeded = yearsAway > 0 && evt.estimatedCost > 0 ? (Number(evt.estimatedCost) / yearsAway / 12) : 0;
+            const priorityColor = { 'must-have':'red', 'want':'amber', 'nice-to-have':'green' };
+            const pc = priorityColor[evt.priority] || 'gray';
+            return html`
+              <div key=${i} class="flex gap-4 p-4 bg-gray-50 rounded-xl">
+                <div class="flex-shrink-0 w-16 text-center">
+                  <p class="text-lg font-bold text-indigo-600">${evt.targetYear || '?'}</p>
+                  <p class="text-xs text-gray-400">${yearsAway > 0 ? yearsAway+'yr' : 'Past'}</p>
+                </div>
+                <div class="flex-1">
+                  <div class="flex items-center gap-2 mb-1">
+                    <p class="font-semibold text-gray-800">${evt.type}</p>
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-${pc}-100 text-${pc}-700">${evt.priority || 'want'}</span>
+                  </div>
+                  <div class="flex gap-4 text-sm text-gray-600">
+                    <span>Est. cost: <strong>${fmtCurrency(Number(evt.estimatedCost)||0)}</strong></span>
+                    ${monthlyNeeded > 0 && html`<span>Save: <strong>${fmtCurrency(monthlyNeeded)}/mo</strong></span>`}
+                  </div>
+                </div>
+              </div>`;
+          })}
+        </div>
+      </${Card}>
+    </div>`;
+}
+
+// --- TAB 6: ESTATE ---
+function Tab6Estate({ plan }) {
+  const e = plan.intake.estate || {};
+  const gross = Number(plan.intake.income?.grossIncome) || 0;
+  const nw = calcNetWorth(plan.intake);
+  const lifeIns = Number(e.lifeInsurance) || 0;
+  const insGap = Math.max(0, gross * 10 - lifeIns);
+  const estateThreshold = 13990000; // 2026 federal estate tax exemption
+
+  const checklist = [
+    { label:'Will (up to date)', done: e.hasWill === 'yes', warning: e.hasWill === 'outdated' ? 'Outdated' : e.hasWill === 'no' ? 'Missing' : null },
+    { label:'Trust', done: e.hasTrust === 'yes', optional:true },
+    { label:'Life insurance', done: lifeIns > 0 },
+    { label:'Disability insurance', done: e.disabilityIns?.startsWith('yes') },
+    { label:'Healthcare proxy / POA', done: false, note:'Not collected in intake — verify separately' },
+    { label:'Beneficiary designations reviewed', done: false, note:'Review 401k, IRA, and insurance beneficiaries annually' },
+  ];
+
+  return html`
+    <div class="space-y-6">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">Estate Basics</h1>
+        <p class="text-gray-500 mt-1">Document checklist, insurance gaps, and estate tax exposure.</p>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Checklist -->
+        <${Card}>
+          <h3 class="text-base font-semibold text-gray-900 mb-4">Document Checklist</h3>
+          <div class="space-y-3">
+            ${checklist.map((item, i) => html`
+              <div key=${i} class="flex items-start gap-3">
+                <span class="text-xl mt-0.5">${item.done ? '✅' : item.optional ? '⬜' : '❌'}</span>
+                <div>
+                  <p class="font-medium text-gray-700">${item.label}</p>
+                  ${item.warning && html`<p class="text-xs text-amber-600">${item.warning}</p>`}
+                  ${item.note && html`<p class="text-xs text-gray-400">${item.note}</p>`}
+                </div>
+              </div>`)}
+          </div>
+        </${Card}>
+
+        <!-- Insurance & Estate Tax -->
+        <div class="space-y-4">
+          <${Card}>
+            <h3 class="text-base font-semibold text-gray-900 mb-3">Life Insurance Gap</h3>
+            <div class="space-y-1 text-sm">
+              <div class="flex justify-between"><span class="text-gray-500">Current coverage</span><span>${fmtCurrency(lifeIns)}</span></div>
+              <div class="flex justify-between"><span class="text-gray-500">Rule-of-thumb target (10× income)</span><span>${fmtCurrency(gross*10)}</span></div>
+              <div class="flex justify-between font-semibold ${insGap > 0 ? 'text-red-600' : 'text-green-600'}">
+                <span>Gap</span><span>${insGap > 0 ? fmtCurrency(insGap) + ' under-insured' : 'Adequately covered'}</span>
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mt-2">10× rule is a starting point. Actual need depends on dependents, debts, and income replacement years needed.</p>
+          </${Card}>
+
+          <${Card}>
+            <h3 class="text-base font-semibold text-gray-900 mb-3">Estate Tax Exposure</h3>
+            <div class="space-y-1 text-sm">
+              <div class="flex justify-between"><span class="text-gray-500">Estimated net worth</span><span>${fmtCurrency(nw.netWorth)}</span></div>
+              <div class="flex justify-between"><span class="text-gray-500">2026 federal exemption</span><span>${fmtCurrency(estateThreshold)}</span></div>
+              <div class="flex justify-between font-semibold ${nw.netWorth > estateThreshold ? 'text-red-600' : 'text-green-600'}">
+                <span>${nw.netWorth > estateThreshold ? 'Above exemption' : 'Below exemption'}</span>
+                <span>${nw.netWorth > estateThreshold ? fmtCurrency(nw.netWorth - estateThreshold) + ' taxable' : 'No federal estate tax'}</span>
+              </div>
+            </div>
+            <p class="text-xs text-gray-400 mt-2">Note: State estate taxes vary. TCJA exemption sunset watch: exemption may drop significantly post-2025 if not extended.</p>
+          </${Card}>
+        </div>
+      </div>
+    </div>`;
+}
+
+// --- TAB 7: AI ADVISOR ---
+function Tab7Advisor({ plan, apiKey }) {
+  const [messages, setMessages] = useState(plan.advisorHistory || []);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const endRef = useRef(null);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior:'smooth' }); }, [messages]);
+
+  const SYSTEM_PROMPT = `You are a fiduciary financial advisor. You have CFP, CPA, and CIO-level knowledge. You speak directly, without hedging or boilerplate disclaimers. You assume financial literacy but explain advanced concepts when needed.
+
+Your client's full financial plan is provided as JSON. Use only this data. Do not invent facts about the client. If data is missing, ask for it or explicitly note the gap.
+
+Your job:
+- Surface what the client cannot see themselves
+- Challenge weak assumptions with reasoning
+- Recommend the highest-leverage moves, ranked
+- Quantify tradeoffs (tax impact, opportunity cost, risk)
+- Call out tail risks and concentration
+
+You are not selling anything. You have no products. You are paid to be right and useful, not agreeable. If the plan is sound, say so briefly and move to the sharpest available improvement. If something is broken, say so directly.
+
+Format: Start with the answer. Then reasoning. Then second-order effects if relevant. Use tables for comparisons. No filler.`;
+
+  async function sendMessage(text) {
+    if (!apiKey) { setError('Add your Anthropic API key in Settings.'); return; }
+    if (!text.trim()) return;
+
+    const planContext = `\n\n--- CLIENT FINANCIAL PLAN (JSON) ---\n${JSON.stringify(plan.intake, null, 2)}\n\nAssumptions: ${JSON.stringify(plan.assumptions)}\n---\n`;
+    const userMsg = { role:'user', content: text };
+    const newMessages = [...messages, userMsg];
+    setMessages(newMessages);
+    setInput('');
+    setLoading(true);
+    setError('');
+
+    try {
+      // PROD: move API call to server route to protect API key
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 2048,
+          system: SYSTEM_PROMPT,
+          messages: [
+            { role: 'user', content: planContext + '\n' + text },
+            ...newMessages.slice(1).map(m => ({ role: m.role, content: m.content })),
+          ],
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error?.message || `API error ${resp.status}`);
+      }
+
+      const data = await resp.json();
+      const assistantText = data.content?.[0]?.text || '(no response)';
+      const finalMessages = [...newMessages, { role:'assistant', content: assistantText }];
+      setMessages(finalMessages);
+    } catch(err) {
+      setError('Error: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const QUICK_PROMPTS = [
+    'Review my overall plan — what are the top 3 things to fix?',
+    'Where am I most financially exposed right now?',
+    'Stress-test my retirement plan — what could go wrong?',
+    'Am I optimizing my tax situation?',
+  ];
+
+  if (!apiKey) {
+    return html`
+      <div class="space-y-6">
+        <h1 class="text-2xl font-bold text-gray-900">AI Financial Advisor</h1>
+        <${Card} className="text-center py-12">
+          <p class="text-4xl mb-4">🔑</p>
+          <h3 class="text-lg font-semibold text-gray-800 mb-2">API Key Required</h3>
+          <p class="text-gray-500 text-sm">Add your Anthropic API key in Settings to use the AI advisor. Your key is stored only in your browser and never sent to any server other than Anthropic.</p>
+        </${Card}>
+      </div>`;
+  }
+
+  return html`
+    <div class="space-y-4">
+      <div>
+        <h1 class="text-2xl font-bold text-gray-900">AI Financial Advisor</h1>
+        <p class="text-gray-500 mt-1">Powered by Claude. Your full plan is provided as context. Educational only — not personalized licensed advice.</p>
+      </div>
+
+      <!-- Quick prompts -->
+      <div class="flex flex-wrap gap-2">
+        ${QUICK_PROMPTS.map(p => html`
+          <button key=${p} onClick=${() => sendMessage(p)}
+            class="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-full transition-colors">
+            ${p}
+          </button>`)}
+      </div>
+
+      <!-- Chat -->
+      <${Card} className="min-h-96">
+        <div class="space-y-4 max-h-96 overflow-y-auto mb-4">
+          ${messages.length === 0 && html`<p class="text-gray-400 text-sm text-center py-8">Ask anything about your plan. Your full financial data is provided as context.</p>`}
+          ${messages.map((m, i) => html`
+            <div key=${i} class="chat-bubble ${m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}">
+              <div class="max-w-prose ${m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-800'} px-4 py-3 rounded-2xl text-sm whitespace-pre-wrap">
+                ${m.content}
+              </div>
+            </div>`)}
+          ${loading && html`<div class="flex justify-start"><div class="bg-gray-100 px-4 py-3 rounded-2xl"><span class="spinner"></span></div></div>`}
+          ${error && html`<${Badge} type="warning">${error}</${Badge}>`}
+          <div ref=${endRef} />
+        </div>
+
+        <div class="flex gap-2 border-t border-gray-100 pt-4">
+          <input type="text" class="flex-1 border border-gray-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="Ask about your plan…" value=${input}
+            onInput=${e => setInput(e.target.value)}
+            onKeyDown=${e => e.key === 'Enter' && !loading && sendMessage(input)} />
+          <button onClick=${() => sendMessage(input)} disabled=${loading || !input.trim()}
+            class="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors">
+            Send
+          </button>
+        </div>
+      </${Card}>
+    </div>`;
+}
+
+// ============================================================
+// SECTION: SETTINGS PANEL
+// ============================================================
+
+function SettingsPanel({ plan, onUpdate, apiKey, onSetApiKey, onClose, onReset }) {
+  const [keyInput, setKeyInput] = useState(apiKey ? '••••••••' + apiKey.slice(-4) : '');
+  const [editingKey, setEditingKey] = useState(!apiKey);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [assumptions, setAssumptions] = useState({ ...plan.assumptions });
+
+  function handleExport() {
+    const warned = confirm('⚠️ This JSON file contains all your financial data. Store it securely and do not share it. Continue with export?');
+    if (!warned) return;
+    const blob = new Blob([JSON.stringify(plan, null, 2)], { type:'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `fiduciary-plan-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+  }
+
+  function handleSaveAssumptions() {
+    onUpdate({ ...plan, assumptions });
+    alert('Assumptions saved. Charts will update automatically.');
+  }
+
+  const assumptionFields = [
+    { key:'equityReturn', label:'Equity return (nominal)', pct:true },
+    { key:'bondReturn',   label:'Bond return (nominal)', pct:true },
+    { key:'inflation',    label:'Inflation rate', pct:true },
+    { key:'wageGrowth',   label:'Wage growth rate', pct:true },
+    { key:'lifeExpectancy',label:'Life expectancy (years)', pct:false },
+    { key:'ssAge',        label:'Social Security start age', pct:false },
+    { key:'monteCarloRuns',label:'Monte Carlo runs', pct:false },
+  ];
+
+  return html`
+    <div class="fixed inset-0 bg-black/50 z-50 flex items-start justify-end">
+      <div class="bg-white h-full w-full max-w-md overflow-y-auto shadow-2xl">
+        <div class="p-6 border-b border-gray-100 flex justify-between items-center">
+          <h2 class="text-xl font-bold text-gray-900">Settings</h2>
+          <button onClick=${onClose} class="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+        </div>
+
+        <div class="p-6 space-y-8">
+          <!-- API Key -->
+          <div>
+            <h3 class="font-semibold text-gray-800 mb-3">Anthropic API Key</h3>
+            ${editingKey
+              ? html`
+                <input type="password" class="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-2"
+                  placeholder="sk-ant-..." onInput=${e => setKeyInput(e.target.value)} value=${keyInput} />
+                <div class="flex gap-2">
+                  <button onClick=${() => { onSetApiKey(keyInput); setEditingKey(false); setKeyInput('••••••••'+keyInput.slice(-4)); }}
+                    class="bg-indigo-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-indigo-700">Save</button>
+                  <button onClick=${() => setEditingKey(false)} class="border border-gray-200 px-3 py-1.5 rounded-lg text-sm text-gray-600">Cancel</button>
+                </div>`
+              : html`
+                <div class="flex items-center gap-2">
+                  <code class="bg-gray-100 px-3 py-1.5 rounded-lg text-sm flex-1">${keyInput || 'Not set'}</code>
+                  <button onClick=${() => { setKeyInput(''); setEditingKey(true); }} class="text-sm text-indigo-600 hover:underline">Edit</button>
+                  ${apiKey && html`<button onClick=${() => { onSetApiKey(''); setKeyInput(''); }} class="text-sm text-red-500 hover:underline">Clear</button>`}
+                </div>`}
+            <p class="text-xs text-gray-400 mt-2">Stored in localStorage only. Never transmitted except to api.anthropic.com.</p>
+          </div>
+
+          <!-- Assumptions -->
+          <div>
+            <h3 class="font-semibold text-gray-800 mb-3">Model Assumptions</h3>
+            <div class="space-y-3">
+              ${assumptionFields.map(({ key, label, pct }) => html`
+                <div key=${key} class="flex items-center justify-between">
+                  <label class="text-sm text-gray-600">${label}</label>
+                  <div class="flex items-center gap-1">
+                    <input type="number" class="w-20 border border-gray-200 rounded-lg px-2 py-1 text-sm text-right focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                      value=${pct ? (assumptions[key]*100).toFixed(1) : assumptions[key]}
+                      step=${pct ? '0.1' : '1'}
+                      onInput=${e => setAssumptions({ ...assumptions, [key]: pct ? Number(e.target.value)/100 : Number(e.target.value) })} />
+                    ${pct && html`<span class="text-sm text-gray-400">%</span>`}
+                  </div>
+                </div>`)}
+            </div>
+            <button onClick=${handleSaveAssumptions} class="mt-3 w-full bg-indigo-600 text-white py-2 rounded-xl text-sm hover:bg-indigo-700">Save Assumptions</button>
+          </div>
+
+          <!-- Export / Import / Reset -->
+          <div>
+            <h3 class="font-semibold text-gray-800 mb-3">Data Management</h3>
+            <div class="space-y-2">
+              <button onClick=${handleExport} class="w-full border border-gray-200 py-2 rounded-xl text-sm text-gray-700 hover:bg-gray-50">⬇ Export plan as JSON</button>
+              ${!confirmReset
+                ? html`<button onClick=${() => setConfirmReset(true)} class="w-full border border-red-200 py-2 rounded-xl text-sm text-red-600 hover:bg-red-50">🗑 Reset all data</button>`
+                : html`
+                  <div class="border-2 border-red-300 rounded-xl p-3">
+                    <p class="text-sm text-red-700 mb-2 font-medium">This will permanently delete all your data.</p>
+                    <div class="flex gap-2">
+                      <button onClick=${onReset} class="flex-1 bg-red-600 text-white py-1.5 rounded-lg text-sm hover:bg-red-700">Yes, delete everything</button>
+                      <button onClick=${() => setConfirmReset(false)} class="flex-1 border border-gray-200 py-1.5 rounded-lg text-sm text-gray-600">Cancel</button>
+                    </div>
+                  </div>`}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// SECTION: APP ROOT
+// ============================================================
+
+function App() {
+  const [plan, setPlanState] = useState(() => loadPlan() || FRESH_PLAN());
+  const [screen, setScreen] = useState(() => {
+    const saved = loadPlan();
+    if (!saved) return 'landing';
+    if (saved.intakeProgress?.completed) return 'dashboard';
+    if (saved.intakeProgress?.currentQuestion > 0) return 'intake';
+    return 'landing';
+  });
+  const [apiKey, setApiKeyState] = useState(getApiKey);
+  const [showSettings, setShowSettings] = useState(false);
+
+  const saveTimer = useRef(null);
+
+  function setPlan(newPlan) {
+    setPlanState(newPlan);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => savePlan(newPlan), 500);
+  }
+
+  function handleSetApiKey(k) {
+    setApiKeyState(k);
+    setApiKey(k);
+  }
+
+  function handleReset() {
+    localStorage.removeItem(LS_KEY);
+    setPlanState(FRESH_PLAN());
+    setScreen('landing');
+    setShowSettings(false);
+  }
+
+  function handleImport(importedPlan) {
+    setPlan(importedPlan);
+    setScreen(importedPlan.intakeProgress?.completed ? 'dashboard' : 'intake');
+  }
+
+  if (__DEV__) {
+    window.__PLAN__ = plan;
+  }
+
+  return html`
+    <div>
+      ${screen === 'landing' && html`<${Landing}
+        onStart=${() => { setPlan(FRESH_PLAN()); setScreen('intake'); }}
+        onImport=${handleImport} />`}
+
+      ${screen === 'intake' && html`<${IntakeEngine}
+        plan=${plan}
+        onUpdate=${setPlan}
+        onComplete=${() => setScreen('dashboard')} />`}
+
+      ${screen === 'dashboard' && html`<${Dashboard}
+        plan=${plan}
+        onUpdate=${setPlan}
+        apiKey=${apiKey}
+        onOpenSettings=${() => setShowSettings(true)} />`}
+
+      ${showSettings && html`<${SettingsPanel}
+        plan=${plan}
+        onUpdate=${setPlan}
+        apiKey=${apiKey}
+        onSetApiKey=${handleSetApiKey}
+        onClose=${() => setShowSettings(false)}
+        onReset=${handleReset} />`}
+    </div>`;
+}
+
+const root = createRoot(document.getElementById('root'));
+root.render(html`<${App} />`);
+</script>
+</body>
+</html>
